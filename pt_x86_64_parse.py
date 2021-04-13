@@ -1,72 +1,135 @@
 from pt_x86_64_definitions import *
 from pt_common import *
 
-def parse_pml4(phys_mem, addr):
+def parse_pml4(phys_mem, addr, offset = -1):
     entries = []
     values = read_page(phys_mem, addr)
+    s_entry = None
+
     for u, value in enumerate(values):
         if (value & 0x1) != 0: # Page must be present
             entry = PML4_Entry(value, u)
             entries.append(entry)
-    return entries
+
+            if offset >= 0 and u == offset:
+                s_entry = entry
+
+    return entries, s_entry
 
 def parse_pml4es(phys_mem, pml4es):
     entries = []
     for pml4e in pml4es:
-        pdpe = parse_pdp(phys_mem, pml4e)
+        pdpe, _ = parse_pdp(phys_mem, pml4e)
         entries.extend(pdpe)
     return entries
 
-def parse_pdp(phys_mem, pml4e):
+def parse_pdp(phys_mem, pml4e, offset = -1):
     entries = []
     values = read_page(phys_mem, pml4e.pdp)
+    s_entry = None
+
     for u, value in enumerate(values):
         if (value & 0x1) != 0:
             entry = PDP_Entry(value, pml4e.virt_part, u)
             entries.append(entry)
-    return entries
+
+            if offset >= 0 and u == offset:
+                s_entry = entry
+
+    return entries, s_entry
 
 def parse_pdpes(phys_mem, pdpes):
     entries = []
     pages = []
     for pdpe in pdpes:
         if pdpe.one_gig == False:
-            pdes = parse_pd(phys_mem, pdpe)
+            pdes, _ = parse_pd(phys_mem, pdpe)
             entries.extend(pdes)
         else:
             page = create_page_from_pdpe(pdpe)
             one_gig_pages.append(page)
     return entries, pages
 
-def parse_pd(phys_mem, pdpe):
+def parse_pd(phys_mem, pdpe, offset = -1):
     entries = []
     values = read_page(phys_mem, pdpe.pd)
+    s_entry = None
+
     for u, value in enumerate(values):
         if (value & 0x1) != 0:
             entry = PD_Entry(value, pdpe.virt_part, u)
             entries.append(entry)
-    return entries
+
+            if offset >= 0 and u == offset:
+                s_entry = entry
+
+    return entries, s_entry
 
 def parse_pdes(phys_mem, pdes):
     entries = []
     pages = []
     for pde in pdes:
         if pde.two_mb == False:
-            ptes = parse_pt(phys_mem, pde)
+            ptes, _ = parse_pt(phys_mem, pde)
             entries.extend(ptes)
         else:
             page = create_page_from_pde(pde)
             pages.append(page)
     return entries, pages
 
-def parse_pt(phys_mem, pde):
+def parse_pt(phys_mem, pde, offset = -1):
     entries = []
     values = read_page(phys_mem, pde.pt)
+    s_entry = None
+
     for u, value in enumerate(values):
         if (value & 0x1) != 0:
             entry = PT_Entry(value, pde.virt_part, u)
             entries.append(entry)
-    return entries
+
+            if offset >= 0 and u == offset:
+                s_entry = entry
+
+    return entries, s_entry
+
+def build_table_hierarchy(phys_mem, a):
+    p_offset = a & ((1 << 12) - 1)
+    pt_offset = (a >> 12) & ((1 << 9) - 1)
+    pd_offset = (a >> 21) & ((1 << 9) - 1)
+    pdp_offset = (a >> 30) & ((1 << 9) - 1)
+    pml4_offset = (a >> 39) & ((1 << 9) - 1)
+
+    pt_addr = int(gdb.parse_and_eval("$cr3").cast(gdb.lookup_type("long")))
+
+    _, pml4e = parse_pml4(phys_mem, pt_addr, pml4_offset)
+    _, pdpe = parse_pdp(phys_mem, pml4e, pdp_offset)
+
+    if pdpe.one_gig:
+        print("1 GiB page:")
+        page = create_page_from_pdpe(pdpe)
+        print(f"    pml4e({hex(pt_addr + pml4_offset * 8)}): {pml4e}")
+        print(f"    pdpe({hex(pml4e.pdp + pdp_offset * 8)} / {hex(make_canonical(pml4e.virt_part) + pml4e.pdp + pdp_offset * 8)}): {pdpe}")
+        print(page)
+        return
+
+    _, pde = parse_pd(phys_mem, pdpe, pd_offset)
+
+    if pde.two_mb:
+        print("2 MiB page:")
+        page = create_page_from_pde(pde)
+        print(f"    pml4e({hex(pt_addr + pml4_offset * 8)}): {pml4e}")
+        print(f"    pdpe({hex(pml4e.pdp + pdp_offset * 8)} / {hex(make_canonical(pml4e.virt_part) + pml4e.pdp + pdp_offset * 8)}): {pdpe}")
+        print(f"    pde({hex(pdpe.pd + pd_offset * 8)} / {hex(make_canonical(pdpe.virt_part) + pdpe.pd + pd_offset * 8)}): {pde}")
+        return
+
+    _, pte = parse_pt(phys_mem, pde, pd_offset)
+
+    p = create_page_from_pte(pte)
+
+    print(f"    pml4e({hex(pt_addr + pml4_offset * 8)}): {pml4e}")
+    print(f"    pdpe({hex(pml4e.pdp + pdp_offset * 8)} / {hex(make_canonical(pml4e.virt_part) + pml4e.pdp + pdp_offset * 8)}): {pdpe}")
+    print(f"    pde({hex(pdpe.pd + pd_offset * 8)} / {hex(make_canonical(pdpe.virt_part) + pdpe.pd + pd_offset * 8)}): {pde}")
+    print(f"    pte({hex(pde.pt + pt_offset * 8)} / {hex(make_canonical(pde.virt_part) + pde.pt + pt_offset * 8)}): {pte}")
 
 def parse_and_print_x86_64_table(cache, phys_mem, args, should_print = True):
     pt_addr = None
@@ -79,7 +142,7 @@ def parse_and_print_x86_64_table(cache, phys_mem, args, should_print = True):
     if pt_addr in cache:
         page_ranges = cache[pt_addr]
     else:
-        pml4es = parse_pml4(phys_mem, pt_addr)
+        pml4es, _ = parse_pml4(phys_mem, pt_addr)
         pdpes = parse_pml4es(phys_mem, pml4es)
         pdes, one_gig_pages = parse_pdpes(phys_mem, pdpes)
         ptes, two_mb_pages = parse_pdes(phys_mem, pdes)

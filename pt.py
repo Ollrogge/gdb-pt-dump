@@ -71,7 +71,7 @@ class PageTableDump(gdb.Command):
         -s8 VALUE
             Searches for the value VALUE in the ranges after filtering
             VALUE should fit in 8 bytes.
-        -s4 VALUE 
+        -s4 VALUE
             Searches for the value VALUE in the ranges after filtering
             VALUE should fit in 4 bytes.
         -align ALIGNMENT [OFFSET]
@@ -205,6 +205,7 @@ class PageTableDump(gdb.Command):
             search_results = search_memory(self.phys_mem, page_ranges, to_search, to_search_num, aligned_to, aligned_offset)
             for entry in search_results:
                 print("Found at " + hex(entry[0]) + " in " + str(entry[1]))
+                build_table_hierarchy(self.phys_mem, entry[0])
 
     def invoke(self, arg, from_tty):
         if self.init == False:
